@@ -83,6 +83,7 @@ filegroup {
         "drm/DrmEncoder.cpp",
         "drm/DrmFbImporter.cpp",
         "drm/DrmHwc.cpp",
+        "drm/DrmLeaseManager.cpp",
         "drm/DrmMode.cpp",
         "drm/DrmPlane.cpp",
         "drm/DrmProperty.cpp",

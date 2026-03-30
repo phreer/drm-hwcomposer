@@ -19,18 +19,20 @@
 #include <cstring>
 #include <mutex>
 
+#include <thread>
 #include "DrmDevice.h"
 #include "DrmDisplayPipeline.h"
 #include "DrmFbImporter.h"
 #include "DrmProperty.h"
 #include "UEventListener.h"
-#include <thread>
 namespace android {
 
 enum class CtmHandling {
   kDrmOrGpu,    /* Handled by DRM is possible, otherwise by GPU */
   kDrmOrIgnore, /* Handled by DRM is possible, otherwise displayed as is */
 };
+
+class DrmLeaseManager;
 
 class PipelineToFrontendBindingInterface {
  public:
@@ -45,11 +47,11 @@ class PipelineToFrontendBindingInterface {
 class ResourceManager {
  public:
   explicit ResourceManager(
-      PipelineToFrontendBindingInterface *p2f_bind_interface);
-  ResourceManager(const ResourceManager &) = delete;
-  ResourceManager &operator=(const ResourceManager &) = delete;
-  ResourceManager(const ResourceManager &&) = delete;
-  ResourceManager &&operator=(const ResourceManager &&) = delete;
+      PipelineToFrontendBindingInterface* p2f_bind_interface);
+  ResourceManager(const ResourceManager&) = delete;
+  ResourceManager& operator=(const ResourceManager&) = delete;
+  ResourceManager(const ResourceManager&&) = delete;
+  ResourceManager&& operator=(const ResourceManager&&) = delete;
   ~ResourceManager();
 
   void Init();
@@ -60,26 +62,31 @@ class ResourceManager {
     return scale_with_gpu_;
   }
 
-  auto &GetCtmHandling() const {
+  auto& GetCtmHandling() const {
     return ctm_handling_;
   }
 
-  auto &GetMainLock() {
+  auto& GetMainLock() {
     return main_lock_;
   }
 
   auto GetVirtualDisplayPipeline() -> std::shared_ptr<DrmDisplayPipeline>;
   auto GetWritebackConnectorsCount() -> uint32_t;
 
+  auto GetDrmDevices() -> std::vector<std::unique_ptr<DrmDevice>>& {
+    return drms_;
+  }
+
   static auto GetTimeMonotonicNs() -> int64_t;
 
  private:
-  auto GetOrderedConnectors() -> std::vector<DrmConnector *>;
+  auto GetOrderedConnectors() -> std::vector<DrmConnector*>;
   void UpdateFrontendDisplays();
   void DetachAllFrontendDisplays();
   void ReloadNode();
   void HwcServiceThread();
   std::vector<std::unique_ptr<DrmDevice>> drms_;
+  std::unique_ptr<DrmLeaseManager> lease_manager_;
 
   // Android properties:
   bool scale_with_gpu_{};
@@ -89,10 +96,10 @@ class ResourceManager {
 
   std::recursive_mutex main_lock_;
 
-  std::map<DrmConnector *, std::shared_ptr<DrmDisplayPipeline>>
+  std::map<DrmConnector*, std::shared_ptr<DrmDisplayPipeline>>
       attached_pipelines_;
 
-  PipelineToFrontendBindingInterface *const frontend_interface_;
+  PipelineToFrontendBindingInterface* const frontend_interface_;
 
   bool initialized_{};
   int card_num_ = 0;
