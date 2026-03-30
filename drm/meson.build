@@ -7,6 +7,7 @@ src_common += files(
     'DrmEncoder.cpp',
     'DrmFbImporter.cpp',
     'DrmHwc.cpp',
+    'DrmLeaseManager.cpp',
     'DrmMode.cpp',
     'DrmPlane.cpp',
     'DrmProperty.cpp',

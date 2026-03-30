@@ -18,8 +18,8 @@
 
 #include "ResourceManager.h"
 
-#include <sys/stat.h>
 #include <dlfcn.h>
+#include <sys/stat.h>
 
 #include <ctime>
 #include <sstream>
@@ -28,47 +28,51 @@
 #include "drm/DrmAtomicStateManager.h"
 #include "drm/DrmDevice.h"
 #include "drm/DrmDisplayPipeline.h"
+#include "drm/DrmLeaseManager.h"
 #include "drm/DrmPlane.h"
 #include "hwc2_device/DrmHwcTwo.h"
-#include "utils/log.h"
-#include "utils/properties.h"
 #include "hwc2_device/hwcservice_lib.h"
 #include "utils/UniqueFd2.h"
+#include "utils/log.h"
+#include "utils/properties.h"
 namespace android {
 
 ResourceManager::ResourceManager(
-    PipelineToFrontendBindingInterface *p2f_bind_interface)
+    PipelineToFrontendBindingInterface* p2f_bind_interface)
     : frontend_interface_(p2f_bind_interface) {
   uevent_listener_ = UEventListener::CreateInstance();
 }
 
 ResourceManager::~ResourceManager() {
   uevent_listener_->StopThread();
+  if (lease_manager_) {
+    lease_manager_->RevokeAll();
+  }
 }
 
 static bool IsVirtioGpuOwnedByLic(int fd) {
-   drmDevicePtr drm_device = NULL;
-   bool result = false;
+  drmDevicePtr drm_device = NULL;
+  bool result = false;
 
-   if(drmGetDevice(fd, &drm_device) < 0) {
-     ALOGE("Failed to get drm device info: %s\n", strerror(errno));
-     return false;
-   }
+  if (drmGetDevice(fd, &drm_device) < 0) {
+    ALOGE("Failed to get drm device info: %s\n", strerror(errno));
+    return false;
+  }
 
-   // virtio-GPU with subdevice id 0x201 should be owned by LIC, don't touch it.
-   if (drm_device->bustype == DRM_BUS_PCI &&
-       drm_device->deviceinfo.pci->vendor_id == 0x1af4 &&
-       drm_device->deviceinfo.pci->device_id == 0x1110 &&
-       drm_device->deviceinfo.pci->subvendor_id == 0x8086 &&
-       drm_device->deviceinfo.pci->subdevice_id == 0x201) {
-     result = true;
-   }
-   drmFreeDevice(&drm_device);
-   return result;
- }
+  // virtio-GPU with subdevice id 0x201 should be owned by LIC, don't touch it.
+  if (drm_device->bustype == DRM_BUS_PCI &&
+      drm_device->deviceinfo.pci->vendor_id == 0x1af4 &&
+      drm_device->deviceinfo.pci->device_id == 0x1110 &&
+      drm_device->deviceinfo.pci->subvendor_id == 0x8086 &&
+      drm_device->deviceinfo.pci->subdevice_id == 0x201) {
+    result = true;
+  }
+  drmFreeDevice(&drm_device);
+  return result;
+}
 
- static int FindVirtioGpuCard(char* path_pattern, int start, int end) {
-   for (int i = start; i <= end; i++) {
+static int FindVirtioGpuCard(char* path_pattern, int start, int end) {
+  for (int i = start; i <= end; i++) {
     std::ostringstream path;
     path << path_pattern << i;
 
@@ -106,7 +110,7 @@ void ResourceManager::ReloadNode() {
     std::ostringstream path;
     path << path_pattern << idx;
 
-    struct stat buf {};
+    struct stat buf{};
     if (stat(path.str().c_str(), &buf) != 0)
       break;
 
@@ -116,9 +120,10 @@ void ResourceManager::ReloadNode() {
         ALOGD("Skip drm device owned by LIC: %s\n", path.str().c_str());
         break;
       }
-      ALOGD("create ivshmem node card%d, the fd of dev is %x\n", idx, *(dev->GetFd()));
+      ALOGD("create ivshmem node card%d, the fd of dev is %x\n", idx,
+            *(dev->GetFd()));
       drms_.emplace_back(std::move(dev));
-      reloaded_  = true;
+      reloaded_ = true;
       break;
     }
   }
@@ -147,7 +152,7 @@ void ResourceManager::Init() {
       std::ostringstream path;
       path << path_pattern << idx;
 
-      struct stat buf {};
+      struct stat buf{};
       if (stat(path.str().c_str(), &buf) != 0)
         break;
 
@@ -165,7 +170,7 @@ void ResourceManager::Init() {
     } else if (node_num <= 3) {
       int card_id = FindVirtioGpuCard(path_pattern, 0, node_num - 1);
       if (card_id < 0) {
-         card_id = 0;
+        card_id = 0;
       }
       std::ostringstream path;
       path << path_pattern << card_id;
@@ -196,24 +201,33 @@ void ResourceManager::Init() {
     return;
   }
 
+  lease_manager_ = std::make_unique<DrmLeaseManager>(*this);
+  lease_manager_->Init();
+
   uevent_listener_->RegisterHotplugHandler([this] {
     const std::unique_lock lock(GetMainLock());
     UpdateFrontendDisplays();
   });
 
+  // UpdateFrontendDisplays() must run before CreateLeases() so that
+  // DrmCrtc::CanBind() reflects CRTCs already claimed by non-leased pipelines.
+  // DrmLeaseManager::Init() already resolved connector names to IDs so that
+  // IsConnectorLeased() can filter leased connectors during this call.
   UpdateFrontendDisplays();
+  lease_manager_->CreateLeases();
   pt_ = std::thread(&ResourceManager::HwcServiceThread, this);
   initialized_ = true;
 }
 
 void ResourceManager::HwcServiceThread() {
   typedef void (*StartHwcInfoService)(DrmHwcTwo*);
-  void *handle = dlopen("/vendor/lib64/hw/libhwcservicelib.so", RTLD_NOW);
+  void* handle = dlopen("/vendor/lib64/hw/libhwcservicelib.so", RTLD_NOW);
   if (!handle) {
     ALOGE("dlopen /vendor/lib64/hw/libhwcservicelib.so fail");
     return;
   }
-  StartHwcInfoService func = (StartHwcInfoService)dlsym(handle, "StartHwcInfoService");
+  StartHwcInfoService func = (StartHwcInfoService)dlsym(handle,
+                                                        "StartHwcInfoService");
   if (!func) {
     ALOGE("dlsym(StartHwcInfoService) fail ");
     dlclose(handle);
@@ -239,7 +253,7 @@ void ResourceManager::DeInit() {
 }
 
 auto ResourceManager::GetTimeMonotonicNs() -> int64_t {
-  struct timespec ts {};
+  struct timespec ts{};
   clock_gettime(CLOCK_MONOTONIC, &ts);
   constexpr int64_t kNsInSec = 1000000000LL;
   return (int64_t(ts.tv_sec) * kNsInSec) + int64_t(ts.tv_nsec);
@@ -250,7 +264,11 @@ void ResourceManager::UpdateFrontendDisplays() {
     ReloadNode();
   auto ordered_connectors = GetOrderedConnectors();
 
-  for (auto *conn : ordered_connectors) {
+  for (auto* conn : ordered_connectors) {
+    if (lease_manager_ && lease_manager_->IsConnectorLeased(conn->GetId())) {
+      continue;
+    }
+
     conn->UpdateModes();
     conn->UpdateEdidWrapper();
     auto connected = conn->IsConnected();
@@ -269,7 +287,7 @@ void ResourceManager::UpdateFrontendDisplays() {
           attached_pipelines_[conn] = std::move(pipeline);
         }
       } else {
-        auto &pipeline = attached_pipelines_[conn];
+        auto& pipeline = attached_pipelines_[conn];
         pipeline->AtomicDisablePipeline();
         frontend_interface_->UnbindDisplay(pipeline);
         attached_pipelines_.erase(conn);
@@ -284,30 +302,30 @@ void ResourceManager::UpdateFrontendDisplays() {
 }
 
 void ResourceManager::DetachAllFrontendDisplays() {
-  for (auto &p : attached_pipelines_) {
+  for (auto& p : attached_pipelines_) {
     frontend_interface_->UnbindDisplay(p.second);
   }
   attached_pipelines_.clear();
   frontend_interface_->FinalizeDisplayBinding();
 }
 
-auto ResourceManager::GetOrderedConnectors() -> std::vector<DrmConnector *> {
+auto ResourceManager::GetOrderedConnectors() -> std::vector<DrmConnector*> {
   /* Put internal displays first then external to
    * ensure Internal will take Primary slot
    */
 
-  std::vector<DrmConnector *> ordered_connectors;
+  std::vector<DrmConnector*> ordered_connectors;
 
-  for (auto &drm : drms_) {
-    for (const auto &conn : drm->GetConnectors()) {
+  for (auto& drm : drms_) {
+    for (const auto& conn : drm->GetConnectors()) {
       if (conn->IsInternal()) {
         ordered_connectors.emplace_back(conn.get());
       }
     }
   }
 
-  for (auto &drm : drms_) {
-    for (const auto &conn : drm->GetConnectors()) {
+  for (auto& drm : drms_) {
+    for (const auto& conn : drm->GetConnectors()) {
       if (conn->IsExternal()) {
         ordered_connectors.emplace_back(conn.get());
       }
@@ -319,8 +337,8 @@ auto ResourceManager::GetOrderedConnectors() -> std::vector<DrmConnector *> {
 
 auto ResourceManager::GetVirtualDisplayPipeline()
     -> std::shared_ptr<DrmDisplayPipeline> {
-  for (auto &drm : drms_) {
-    for (const auto &conn : drm->GetWritebackConnectors()) {
+  for (auto& drm : drms_) {
+    for (const auto& conn : drm->GetWritebackConnectors()) {
       auto pipeline = DrmDisplayPipeline::CreatePipeline(*conn);
       if (!pipeline) {
         ALOGE("Failed to create pipeline for writeback connector %s",
@@ -336,7 +354,7 @@ auto ResourceManager::GetVirtualDisplayPipeline()
 
 auto ResourceManager::GetWritebackConnectorsCount() -> uint32_t {
   uint32_t count = 0;
-  for (auto &drm : drms_) {
+  for (auto& drm : drms_) {
     count += drm->GetWritebackConnectors().size();
   }
   return count;
