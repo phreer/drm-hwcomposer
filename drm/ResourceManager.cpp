@@ -207,6 +207,10 @@ void ResourceManager::Init() {
   uevent_listener_->RegisterHotplugHandler([this] {
     const std::unique_lock lock(GetMainLock());
     UpdateFrontendDisplays();
+    if (lease_manager_) {
+      lease_manager_->ReconcileLeases();
+    }
+    UpdateFrontendDisplays();
   });
 
   // UpdateFrontendDisplays() must run before CreateLeases() so that
@@ -265,14 +269,22 @@ void ResourceManager::UpdateFrontendDisplays() {
   auto ordered_connectors = GetOrderedConnectors();
 
   for (auto* conn : ordered_connectors) {
-    if (lease_manager_ && lease_manager_->IsConnectorLeased(conn->GetId())) {
-      continue;
-    }
-
     conn->UpdateModes();
     conn->UpdateEdidWrapper();
     auto connected = conn->IsConnected();
     auto attached = attached_pipelines_.count(conn) != 0;
+    auto leased = lease_manager_ &&
+                  lease_manager_->IsConnectorLeased(conn->GetId());
+
+    if (leased) {
+      if (attached) {
+        auto& pipeline = attached_pipelines_[conn];
+        pipeline->AtomicDisablePipeline();
+        frontend_interface_->UnbindDisplay(pipeline);
+        attached_pipelines_.erase(conn);
+      }
+      continue;
+    }
 
     if (connected != attached) {
       ALOGI("%s connector %s", connected ? "Attaching" : "Detaching",

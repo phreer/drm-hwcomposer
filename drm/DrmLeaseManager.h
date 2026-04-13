@@ -83,6 +83,9 @@ class DrmLeaseManager {
   // should be excluded from HWC pipeline management.
   auto IsConnectorLeased(uint32_t connector_id) const -> bool;
 
+  // Reconcile active leases with the current connector topology after hotplug.
+  auto ReconcileLeases() -> int;
+
   // Revoke all active leases and stop the socket server thread.
   void RevokeAll();
 
@@ -90,6 +93,8 @@ class DrmLeaseManager {
   // Resolve {connector_id, crtc_id, plane_id, ...} for the given connector.
   auto ResolveLeaseResources(DrmDevice& dev, uint32_t connector_id)
       -> std::optional<std::vector<uint32_t>>;
+
+  void RefreshConfiguredConnectorIds();
 
   // Background thread: for each active lease, listen on its socket path and
   // deliver the lease fd via SCM_RIGHTS.  Reconnections are supported.
@@ -100,9 +105,9 @@ class DrmLeaseManager {
 
   ResourceManager& res_mgr_;
   std::vector<LeaseConfig> lease_configs_;
-  std::set<uint32_t> leased_connector_ids_;  // populated by Init(), used by
-                                             // IsConnectorLeased()
+  std::set<uint32_t> configured_connector_ids_;
   std::vector<ActiveLease> active_leases_;
+  bool hide_configured_connectors_{true};
 
   std::thread socket_thread_;
   bool stop_thread_{};

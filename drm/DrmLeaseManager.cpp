@@ -85,22 +85,35 @@ auto DrmLeaseManager::Init() -> int {
   // connectors during UpdateFrontendDisplays(), which runs before
   // CreateLeases().  CreateLeases() still needs UpdateFrontendDisplays() to
   // have run first so that CanBind() reflects already-reserved CRTCs.
-  for (const auto& cfg : lease_configs_) {
-    for (auto& drm : res_mgr_.GetDrmDevices()) {
-      for (const auto& conn : drm->GetConnectors()) {
-        if (conn->GetName() == cfg.connector_name) {
-          leased_connector_ids_.insert(conn->GetId());
-          break;
-        }
-      }
-    }
-  }
+  RefreshConfiguredConnectorIds();
 
   return 0;
 }
 
 auto DrmLeaseManager::IsConnectorLeased(uint32_t connector_id) const -> bool {
-  return leased_connector_ids_.count(connector_id) != 0;
+  for (const auto& lease : active_leases_) {
+    if (lease.connector_id == connector_id) {
+      return true;
+    }
+  }
+
+  return hide_configured_connectors_ &&
+         configured_connector_ids_.count(connector_id) != 0;
+}
+
+void DrmLeaseManager::RefreshConfiguredConnectorIds() {
+  configured_connector_ids_.clear();
+
+  for (const auto& cfg : lease_configs_) {
+    for (auto& drm : res_mgr_.GetDrmDevices()) {
+      for (const auto& conn : drm->GetConnectors()) {
+        if (conn->GetName() == cfg.connector_name) {
+          configured_connector_ids_.insert(conn->GetId());
+          break;
+        }
+      }
+    }
+  }
 }
 
 auto DrmLeaseManager::ResolveLeaseResources(DrmDevice& dev,
@@ -180,8 +193,13 @@ auto DrmLeaseManager::ResolveLeaseResources(DrmDevice& dev,
 
 auto DrmLeaseManager::CreateLeases() -> int {
   if (lease_configs_.empty()) {
+    hide_configured_connectors_ = false;
     return 0;
   }
+
+  RefreshConfiguredConnectorIds();
+
+  active_leases_.clear();
 
   for (const auto& cfg : lease_configs_) {
     // Find the DRM device that owns this connector.
@@ -236,12 +254,25 @@ auto DrmLeaseManager::CreateLeases() -> int {
     active_leases_.push_back(std::move(lease));
   }
 
+  hide_configured_connectors_ = false;
+
   if (!active_leases_.empty()) {
     stop_thread_ = false;
     socket_thread_ = std::thread(&DrmLeaseManager::SocketServerThread, this);
   }
 
   return 0;
+}
+
+auto DrmLeaseManager::ReconcileLeases() -> int {
+  if (lease_configs_.empty()) {
+    return 0;
+  }
+
+  RevokeAll();
+  hide_configured_connectors_ = false;
+  RefreshConfiguredConnectorIds();
+  return CreateLeases();
 }
 
 // static
@@ -415,6 +446,10 @@ void DrmLeaseManager::RevokeAll() {
   }
 
   active_leases_.clear();
+
+  if (!lease_configs_.empty()) {
+    RefreshConfiguredConnectorIds();
+  }
 }
 
 }  // namespace android
